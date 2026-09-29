@@ -41,6 +41,11 @@ jobs:
       - name: Install dependencies
         run: |
           composer update --prefer-dist --no-progress
+      - name: Write private key from secret
+        run: |
+          printf '%s' "${{ secrets.OCI_PRIVATE_KEY_CONTENT }}" > /tmp/oci.pem
+          chmod 600 /tmp/oci.pem
+          head -1 /tmp/oci.pem
       - name: Run test suite
         run: |
           vendor/bin/phpunit --color tests/
@@ -49,7 +54,7 @@ jobs:
           OCI_USER_ID: ${{ secrets.OCI_USER_ID }}
           OCI_TENANCY_ID: ${{ secrets.OCI_TENANCY_ID }}
           OCI_KEY_FINGERPRINT: ${{ secrets.OCI_KEY_FINGERPRINT }}
-          OCI_PRIVATE_KEY_FILENAME: ${{ secrets.OCI_PRIVATE_KEY_FILENAME }}
+          OCI_PRIVATE_KEY_FILENAME: /tmp/oci.pem
           OCI_AVAILABILITY_DOMAIN: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
           OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
           OCI_IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}

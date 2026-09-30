@@ -1,163 +1,112 @@
-# Resolving Oracle Cloud "Out of Capacity" issue and getting free VPS with 4 ARM cores / 24GB of memory
+# OCI ARM Host Capacity Hunter
+
+Automatically retry Oracle Cloud Infrastructure `LaunchInstance` API until free-tier ARM capacity becomes available in your home region.
+
+Forked from [hitrov/oci-arm-host-capacity](https://github.com/hitrov/oci-arm-host-capacity), with simplified setup, Telegram notifications, boot-volume support, and a ready-to-use GitHub Actions workflow.
 
 <p align="center">
-  <a href="https://github.com/hitrov/oci-arm-host-capacity/actions"><img src="https://github.com/hitrov/oci-arm-host-capacity/workflows/Tests/badge.svg" alt="Test"></a>
+  <a href="https://github.com/Hungzazed/oci-arm-host-capacity/actions/workflows/hunt.yml"><img src="https://github.com/Hungzazed/oci-arm-host-capacity/actions/workflows/hunt.yml/badge.svg" alt="Hunt ARM"></a>
 </p>
 
-**Update 2024:** The script is still functional, but many Reddit users now recommend upgrading to Pay As You Go (PAYG) for the best experience. With PAYG, you'll continue to enjoy all the free benefits without any additional cost, but you'll also receive priority for launching instances and are less likely to face "Out of host capacity" errors. Additionally, PAYG unlocks more types of OCI resources, including free Kubernetes-related infrastructure if that's something you're interested in. It's important to set up budget alerts as a safety net and be mindful of the resources you deploy and their associated costs. This way, you can take full advantage of PAYG while keeping your spending in check.
+> Each tenancy gets 3,000 OCPU hours + 18,000 GB hours / month free for `VM.Standard.A1.Flex` (up to 4 OCPUs / 24 GB RAM). Oracle adds capacity from time to time — this script polls `LaunchInstance` until it succeeds.
 
-Very neat and useful configuration was recently [announced](https://blogs.oracle.com/cloud-infrastructure/post/moving-to-ampere-a1-compute-instances-on-oracle-cloud-infrastructure-oci) at Oracle Cloud Infrastructure (OCI) blog as a part of Always Free tier. Sometimes it's complicated to launch an instance due to the "Out of Capacity" error. Here we're solving that issue as Oracle constantly adds capacity from time to time.
+**Tip (2024+):** Many users upgrade to Pay-As-You-Go (PAYG) to get priority for free-tier launches. PAYG keeps Always Free benefits, adds fewer `Out of host capacity` errors, and unlocks more services. Set up budget alerts and watch what you deploy.
 
-> Each tenancy gets the first 3,000 OCPU hours and 18,000 GB hours per month for free to create Ampere A1 Compute instances using the VM.Standard.A1.Flex shape (equivalent to 4 OCPUs and 24 GB of memory).
+---
 
-This approach requires **PHP 7.x or 8.x** and **composer** installed and will call "LaunchInstance" OCI API [endpoint](https://docs.oracle.com/en-us/iaas/api/#/en/iaas/20160918/Instance/LaunchInstance). We'll utilise the [package](https://packagist.org/packages/hitrov/oci-api-php-request-sign) which I've written (and [published](https://github.com/hitrov/oci-api-php-request-sign)) some time ago, here's the [article](https://hitrov.medium.com/creating-mini-php-sdk-to-sign-oracle-cloud-infrastructure-api-requests-d91a224c7008?sk=5b4405c1124bfeac30a370630fd94126).
-
-If you prefer article style, here's a link to [Medium](https://hitrov.medium.com/resolving-oracle-cloud-out-of-capacity-issue-and-getting-free-vps-with-4-arm-cores-24gb-of-6ecd5ede6fcc?sk=01d761f7cd80c77e0fed773972f4d1a8)
-
-YouTube video instruction [https://youtu.be/uzAqgjElc64](https://youtu.be/uzAqgjElc64) 
-is a bit outdated regarding [Configuration](#configuration) but still can be useful for the rest.
-
-- [Generating API key](#generating-api-key)
-- [Installation](#installation)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
 - [Configuration](#configuration)
-  - [Create/copy .env file](#createcopy-env-file)
-  - [General](#general)
-  - [Private key](#private-key)
-  - [Instance parameters](#instance-parameters)
-    - [Mandatory](#mandatory)
-      - [OCI_SUBNET_ID and OCI_IMAGE_ID](#oci_subnet_id-and-oci_image_id)
-      - [OCI_SSH_PUBLIC_KEY (SSH access)](#oci_ssh_public_key-ssh-access)
-    - [Optional](#optional)
-- [Running the script](#running-the-script)
-- [Periodic job setup (cron)](#periodic-job-setup-cron)
-  - [Linux / WSL](#linux--wsl)
-  - [GitHub actions (workflows)](#github-actions-workflows)
-    - [Setup](#setup)
-    - [Read This Carefully](#read-this-carefully)
+- [Getting OCI_SUBNET_ID and OCI_IMAGE_ID](#getting-oci_subnet_id-and-oci_image_id)
+- [Running](#running)
+  - [Recommended: cron-job.org](#recommended-cron-joborg)
+  - [Local / cron](#local--cron)
+  - [GitHub Actions (fallback, delayed)](#github-actions-fallback-delayed)
+  - [Multiple configs](#multiple-configs)
+- [Telegram notification](#telegram-notification)
 - [How it works](#how-it-works)
-- [Assigning public IP address](#assigning-public-ip-address)
+- [Assigning a public IP](#assigning-a-public-ip)
 - [Troubleshooting](#troubleshooting)
-  - [Private key issues](#private-key-issues)
-  - [SSH key issues](#ssh-key-issues)
-- [Multiple configuration support](#multiple-configuration-support)
-- [Conclusion](#conclusion)
+- [Credits](#credits)
 
-## Generating API key
+## Features
 
-After logging in to [OCI Console](http://cloud.oracle.com/), click profile icon and then "User Settings"
+- Retries every Availability Domain on `Out of host capacity` (HTTP 500 + `InternalError`).
+- Skips launch if `OCI_MAX_INSTANCES` of the same shape already exist (checks `ListInstances`).
+- Caches `ListAvailabilityDomains` to `oci_cache.json` when `CACHE_AVAILABILITY_DOMAINS=1`.
+- Backs off on HTTP 429 / `TooManyRequests` via `TOO_MANY_REQUESTS_TIME_WAIT` (state in `too_many_requests_waiter.txt`).
+- Supports custom boot volume size (`OCI_BOOT_VOLUME_SIZE_IN_GBS`) or reuse of an existing boot volume (`OCI_BOOT_VOLUME_ID`).
+- Sends Telegram message on success when configured.
+- Runs locally, via cron, via [cron-job.org](https://cron-job.org) (recommended, no VPS idle needed), or via GitHub Actions (`.github/workflows/hunt.yml`, every 5 min — with delay, see below).
 
-![User Settings](images/user-settings.png)
+## Requirements
 
-Go to Resources -> API keys, click "Add API Key" button
+- PHP >= 7.0 < 9.0 with `ext-curl`, `ext-json`
+- `composer`
+- OCI Always Free (or PAYG) account with an API key
 
-![Add API Key](images/add-api-key.png)
+## Quick start
 
-Make sure "Generate API Key Pair" radio button is selected, click "Download Private Key" and then "Add".
-
-![Download Private Key](images/download-private-key.png)
-
-Copy the contents from textarea and save it to file with a name "config". I put it together with *.pem file in newly created directory /home/ubuntu/.oci
-
-![Configuration File Preview](images/config-file-preview.png)
-
-## Installation
-
-Clone this repository
 ```bash
-git clone https://github.com/hitrov/oci-arm-host-capacity.git
-```
-run
-```bash
-cd oci-arm-host-capacity/
+git clone https://github.com/Hungzazed/oci-arm-host-capacity.git
+cd oci-arm-host-capacity
 composer install
+cp .env.example .env
+# edit .env, then:
+php ./index.php
 ```
+
+Expected failure until capacity appears:
+
+```json
+{
+    "code": "InternalError",
+    "message": "Out of host capacity."
+}
+```
+
+Success prints the new instance JSON and (optionally) sends a Telegram message.
 
 ## Configuration
 
-### Create/copy .env file
+Copy `.env.example` to `.env`. **Never commit `.env` — it contains secrets.**
 
-Copy `.env.example` as `.env`
-```bash
-cp .env.example .env
-```
-You must modify `.env` file below. **Don't push/share it as it possibly contains sensitive information.** 
+### 1. API credentials
 
-All parameters except `OCI_AVAILABILITY_DOMAIN` are mandatory to be set. Please read the comments in `.env` file as well.
+Generate an API key in OCI Console: Profile icon -> User Settings -> Resources -> API keys -> Add API Key -> Generate Key Pair -> Download Private Key -> Add. Copy the values shown into `.env`:
 
-### General
+| Variable | Description |
+|---|---|
+| `OCI_REGION` | e.g. `eu-frankfurt-1` |
+| `OCI_USER_ID` | `ocid1.user.oc1...` |
+| `OCI_TENANCY_ID` | `ocid1.tenancy.oc1...` |
+| `OCI_KEY_FINGERPRINT` | e.g. `b3:a5:90:...` |
+| `OCI_PRIVATE_KEY_FILENAME` | Absolute path or public URL to the `.pem` file, e.g. `"/path/to/oci.pem"` |
 
-Region, user, tenancy, fingerprint should be taken from textarea during API key generation step.
-Adjust these values in `.env` file accordingly:
-- `OCI_REGION`
-- `OCI_USER_ID`
-- `OCI_TENANCY_ID`
-- `OCI_KEY_FINGERPRINT`
+![User Settings](images/user-settings.png)
 
-### Private key
+### 2. Instance parameters
 
-`OCI_PRIVATE_KEY_FILENAME` is an absolute path (including directories) or direct public accessible URL to your *.pem private key file.
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `OCI_SUBNET_ID` | Yes | — | See [below](#getting-oci_subnet_id-and-oci_image_id) |
+| `OCI_IMAGE_ID` | Yes* | — | See below. *Not needed if `OCI_BOOT_VOLUME_ID` is set |
+| `OCI_SSH_PUBLIC_KEY` | Yes | — | Contents of `~/.ssh/id_rsa.pub` in double quotes, single line, no newlines |
+| `OCI_SHAPE` | Yes | — | `VM.Standard.A1.Flex` (ARM) or `VM.Standard.E2.1.Micro` (AMD) |
+| `OCI_OCPUS` | Yes | `4` | ARM: `1/2/3/4` (AMD: `1`) |
+| `OCI_MEMORY_IN_GBS` | Yes | `24` | ARM: `6/12/18/24` (AMD: `1`). Oracle Linux Cloud Developer image needs >= 8 |
+| `OCI_MAX_INSTANCES` | No | `1` | Max existing instances of the same shape before skipping |
+| `OCI_AVAILABILITY_DOMAIN` | Optional for ARM | empty | Leave empty to auto-discover all ADs. **Required** for AMD `E2.1.Micro` (must be the Always Free Eligible AD) and for `OCI_BOOT_VOLUME_ID` |
+| `OCI_BOOT_VOLUME_SIZE_IN_GBS` | No | empty | Custom boot volume size, 50–200 GB for Always Free (min 47 AMD / 50 ARM) |
+| `OCI_BOOT_VOLUME_ID` | No | empty | Reuse existing boot volume OCID. Cannot combine with size above. Must set `OCI_AVAILABILITY_DOMAIN` to the same AD |
+| `CACHE_AVAILABILITY_DOMAINS` | No | `1` | `1` = cache AD list in `oci_cache.json` to reduce API calls |
+| `TOO_MANY_REQUESTS_TIME_WAIT` | No | `600` | Seconds to pause after HTTP 429. `0` / empty = disabled |
+| `TELEGRAM_BOT_API_KEY` | No | empty | See [Telegram](#telegram-notification) |
+| `TELEGRAM_USER_ID` | No | empty | See [Telegram](#telegram-notification) |
 
-### Instance parameters
+AMD Always Free example:
 
-#### Mandatory
-
-##### OCI_SUBNET_ID and OCI_IMAGE_ID
-
-You must start instance creation process from the OCI Console in the browser (Menu -> Compute -> Instances -> Create Instance)
-
-Change image and shape. 
-For Always free AMD x64 - make sure that "Always Free Eligible" availabilityDomain label is there:
-
-![Changing image and shape](images/create-compute-instance.png)
-
-ARMs can be created anywhere within your home region.
-
-Adjust Networking section, set "Do not assign a public IPv4 address" checkbox. If you don't have existing VNIC/subnet, please create VM.Standard.E2.1.Micro instance before doing everything.
-
-![Networking](images/networking.png)
-
-"Add SSH keys" section does not matter for us right now. Before clicking "Create"…
-
-![Add SSH Keys](images/add-ssh-keys.png)
-
-…open browser's dev tools -> network tab. Click "Create" and wait a bit most probably you'll get "Out of capacity" error. Now find /instances API call (red one)…
-
-![Dev Tools](images/dev-tools.png)
-
-…and right click on it -> copy as curl. Paste the clipboard contents in any text editor and review the data-binary parameter. 
-Find `subnetId`, `imageId` and set `OCI_SUBNET_ID`, `OCI_IMAGE_ID`, respectively.
-
-Note `availabilityDomain` for yourself, then read the corresponding comment in `.env` file regarding `OCI_AVAILABILITY_DOMAIN`.
-
-##### OCI_SSH_PUBLIC_KEY (SSH access)
-
-In order to have secure shell (SSH) access to the instance you need to have a keypair, besically 2 files:
-- ~/.ssh/id_rsa 
-- ~/.ssh/id_rsa.pub
-
-Second one (public key) contents (string) should be provided to a command below. 
-The are plenty of tutorials on how to generate them (if you don't have them yet), we won't cover this part here.
-
-```bash
-cat ~/.ssh/id_rsa.pub
-```
-
-Output should be similar to
-```bash
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFwZVQa+F41Jrb4X+p9gFMrrcAqh9ks8ATrcGRitK+R/ github.com@hitrov.com
-```
-
-Change `OCI_SSH_PUBLIC_KEY` inside double quotes - paste the contents above (or you won't be able to login into the newly created instance).
-**NB!** No new lines allowed!
-
-#### Optional
-
-`OCI_OCPUS` and `OCI_MEMORY_IN_GBS` are set `4` and `24` by default. Of course, you can safely adjust them. 
-Possible values are 1/6, 2/12, 3/18 and 4/24, respectively.
-Please notice that "Oracle Linux Cloud Developer" image can be created with at least 8GB of RAM (`OCI_MEMORY_IN_GBS`).
-
-If for some reason your home region is running out of Always free AMD x64 (1/8 OPCU + 1GB RAM), replace values below.
-**NB!** Setting the `OCI_AVAILABILITY_DOMAIN` to `Always Free Eligible` is mandatory for non-ARM architecture!
 ```bash
 OCI_SHAPE=VM.Standard.E2.1.Micro
 OCI_OCPUS=1
@@ -165,241 +114,133 @@ OCI_MEMORY_IN_GBS=1
 OCI_AVAILABILITY_DOMAIN=FeVO:EU-FRANKFURT-1-AD-2
 ```
 
-If you don't have instances of selected shape at all, and need only one, leave the value of `OCI_MAX_INSTANCES=1`. 
-When you managed to launch one and need more (or 2 from scratch), set to `OCI_MAX_INSTANCES=2`. 
+Get your SSH public key:
 
-## Running the script
+```bash
+cat ~/.ssh/id_rsa.pub
+# ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@example.com
+```
+
+## Getting OCI_SUBNET_ID and OCI_IMAGE_ID
+
+1. In OCI Console go to Menu -> Compute -> Instances -> Create Instance.
+2. Pick image + shape (`VM.Standard.A1.Flex`, 4/24). For AMD check the `Always Free Eligible` label.
+3. In Networking, select an existing VCN/subnet (create a `VM.Standard.E2.1.Micro` first if you have none). Uncheck public IP for now.
+4. Open browser DevTools -> Network tab, click Create, wait for the `Out of capacity` error.
+5. Find the red `/instances` POST, right-click -> Copy as cURL, paste into an editor, read `subnetId`, `imageId`, `availabilityDomain` from `--data-binary`.
+6. Set `OCI_SUBNET_ID`, `OCI_IMAGE_ID` accordingly.
+
+![Dev Tools](images/dev-tools.png)
+
+## Running
+
+### Recommended: cron-job.org
+
+Use [cron-job.org](https://cron-job.org) (free) to ping your hosted script every minute — this is more reliable than GitHub Actions for catching short capacity windows.
+
+1. Host this project on a public URL (any cheap VPS / shared hosting with PHP, e.g. `https://your-domain.com/oci-arm-host-capacity/index.php`).
+   - Set `OCI_PRIVATE_KEY_FILENAME` in `.env` to a public URL of your `.pem` (or an OCI Object Storage pre-authenticated URL), because the web host must fetch it.
+   - Visiting that URL should print the same JSON as `php ./index.php` (`Out of host capacity` until success).
+2. Sign up at [cron-job.org](https://cron-job.org) -> Create cronjob:
+   - URL: `https://your-domain.com/oci-arm-host-capacity/index.php`
+   - Interval: every 1 minute (or 2–5 minutes to stay under OCI rate limits).
+   - Request timeout: 30s, enable logging / failure notification.
+3. Done. You will get a Telegram message on success (if configured). Disable/delete the cron-job once your instance is created.
+
+Why not GitHub Actions? See [below](#github-actions-fallback-delayed) — scheduled workflows are queued and often delayed 10–30+ minutes, so you can easily miss capacity that appears for only a few minutes.
+
+### Local / cron
 
 ```bash
 php ./index.php
+# with a custom env file:
+php index.php .env.my_acc1
 ```
 
-I bet that the output (error) will be similar to the one in a browser a few minutes ago
-```json
-{
-    "code": "InternalError",
-    "message": "Out of host capacity."
-}
-```
-or if you already have instances:
-```json
-{
-    "code": "LimitExceeded",
-    "message": "The following service limits were exceeded: standard-a1-memory-count, standard-a1-core-count. Request a service limit increase from the service limits page in the console. "
-}
-```
+Cron (every minute):
 
-## Periodic job setup (cron)
-
-### Linux / WSL
-
-You can now setup periodic job to run the command
-
-Create log file:
 ```bash
 touch /path/to/oci-arm-host-capacity/oci.log
-```
-Set permissions for PHP script to modify it:
-```bash
-chmod 777 /path/to/oci-arm-host-capacity/oci.log
-```
-Get full path to PHP binary
-```bash
-which php
-```
-Usually that's `/usr/bin/php`
-
-Setup itself:
-```bash
+chmod 644 /path/to/oci-arm-host-capacity/oci.log
+which php  # usually /usr/bin/php
 EDITOR=nano crontab -e
 ```
-Add new line to execute the script every minute and append log the output:
-```bash
-* * * * * /usr/bin/php /path/to/oci-arm-host-capacity/index.php >> /path/to/oci-arm-host-capacity/oci.log
+
 ```
-**NB!** Use absolute paths wherever possible
-
-...and save the file (F2, press Y to confirm overwrite, then Enter).
-
-There could be cases when cron user won't have some permissions, there're ways to solve it:
-
-1. Setup job for root user by executing `EDITOR=nano sudo crontab -e`
-2. Move this directory (`oci-arm-host-capacity`) into web server's one e.g. /usr/share/nginx/html and setup cron this way:
-```bash
-* * * * * curl http://server.add.re.ss/oci-arm-host-capacity/index.php >> /path/to/oci-arm-host-capacity/oci.log
-```
-You can also visit the URL above and see the same command output as by running from the shell.
-
-### GitHub actions (workflows)
-
-In order to test the script using GitHub runners (their virtual machines) please complete [Setup](#setup). 
-**NB!** To avoid the ban of your Github account [Read This Carefully](#read-this-carefully) **!!!**
-
-#### Setup
-
-1. Fork this repository
-2. Never push `.env` file, it's in `.gitignore` for a reason
-3. Instead of copying/modifying `.env` file, use `Secrets` in your own repository `Settings`:
-
-`https://github.com/{your-username}/oci-arm-host-capacity/settings/secrets/actions`
-
-4. Click `New repository secret` and set all the values (**one by one**) that you'd set in `.env` file e.g.
-
-![New Repository Secret](images/new-repository-secret.png)
-
-*NB!* No need to double quote any value here!
-
-5. As for the private key, you have 2 options. Either:
-- upload to any web server accessible from the Internet by using just URL or...
-- upload in the [bucket](https://cloud.oracle.com/object-storage/buckets) and `Create Pre-Authenticated Request`. 
-
-![Create Pre-Authenticated Request](images/create-par.png)
-
-6. Copy and save the URL from (5) as `OCI_PRIVATE_KEY_FILENAME` GitHub secret.
-7. Go to any other directory e.g. `cd /Users/hitrov`
-8. `git clone https://github.com/{your-username}/oci-arm-host-capacity`
-9. Adjust the file `.github/workflows/tests.yml` according to [this commit](https://github.com/hitrov/oci-arm-host-capacity/commit/67fe41ebfb9f385ae1614c97b74195ea318c8db7), just execute:
-```bash
-git checkout 67fe41ebfb9f385ae1614c97b74195ea318c8db7 -- .github/workflows/tests.yml
-```
-10. Commit and push this file
-```bash
-git commit -m "Modify workflow to test out periodic job" .github/workflows/tests.yml
-git push origin main
-```
-11. Go to `https://github.com/{your-username}/oci-arm-host-capacity/actions` and check how `Run script` job. 
-
-Here's the example https://github.com/hitrov/oci-arm-host-capacity/runs/4727904401?check_suite_focus=true
-
-![GitHub Worflow cron](images/github-workflow-cron.png)
-
-![Test Periodic Job (cron)](images/test-periodic-job-cron.png)
-
-#### Read This Carefully
-
-Specific GitHub Workflows [commit](https://github.com/hitrov/oci-arm-host-capacity/commit/67fe41ebfb9f385ae1614c97b74195ea318c8db7) 
-used in the [Setup](#setup) take an advantage of [Scheduled events](https://docs.github.com/en/actions/learn-github-actions/events-that-trigger-workflows#scheduled-events)  
-and **will endlessly run the script every 5-20 minutes** (how exactly often - depends on runners' availability). 
-
-**NB!** After you're done with testing, **immediately delete .github/workflows/tests.yml** (because you don't need integration tests - they're written taking into account instances that I have) and push to the `main` branch 
-because infinite run actually violates the [Terms of Use](https://docs.github.com/en/github/site-policy/github-terms-for-additional-products-and-features#actions):
-```
-Actions should not be used for:
-...
-- if using GitHub-hosted runners, any other activity unrelated to the production, testing, deployment, or publication 
-of the software project associated with the repository where GitHub Actions are used.
-...
-GitHub may monitor your use...
-Misuse of GitHub Actions may result in termination of jobs, restrictions in your ability to use GitHub Actions, 
-or the disabling of repositories created to run Actions in a way that violates these Terms.
+* * * * * /usr/bin/php /path/to/oci-arm-host-capacity/index.php >> /path/to/oci-arm-host-capacity/oci.log 2>&1
 ```
 
-This is how you do:
-```bash
-git rm .github/workflows/tests.yml
-git commit -m "Delete workflow file" .github/workflows/tests.yml
-git push origin main
-```
+Use absolute paths. For permission issues run `sudo crontab -e` or fix file ownership instead of `chmod 777`.
 
-## How it works
+### GitHub Actions (fallback, delayed)
 
-Before the instance creation, script will: 
-1. Call [ListAvailabilityDomains](https://docs.oracle.com/en-us/iaas/api/#/en/identity/20160918/AvailabilityDomain/ListAvailabilityDomains) OCI API method
-2. Call [ListInstances](https://docs.oracle.com/en-us/iaas/api/#/en/iaas/20160918/Instance/ListInstances) OCI API method
-and check whether there're already existing instances with the same `OCI_SHAPE`, 
-as well as number of them `OCI_MAX_INSTANCES` (you can safely adjust the last one if you wanna e.g. two `VM.Standard.A1.Flex` with 2/12 - 2 OCPUs and 12GB RAM - each).
+> ⚠️ **Expected delay:** GitHub schedules `cron` workflows on best-effort basis. Even with `*/5 * * * *` in `hunt.yml`, runs are queued behind other jobs, can start 10–30+ minutes late during peak hours, take 1–2 minutes just to provision `ubuntu-latest` + PHP + `composer install`, and may be skipped entirely if the repo is inactive (GitHub disables schedules after 60 days without activity). OCI free capacity often disappears in minutes, so GitHub Actions can miss it. Prefer [cron-job.org](#recommended-cron-joborg) or local cron for real hunting; use Actions only for testing.
 
-Script won't create new instance if current (actual) number return from the API exceeds the one from `OCI_MAX_INSTANCES` variable.
+`hunt.yml` runs every 5 minutes plus manual `workflow_dispatch`. No `.env` file needed — all values come from repository Secrets / Variables.
 
-In case of success the JSON output will be similar to
+1. Fork this repo.
+2. Go to Settings -> Secrets and variables -> Actions -> New repository secret, add one by one (same names as `.env`, **no quotes**):
+   `OCI_REGION`, `OCI_USER_ID`, `OCI_TENANCY_ID`, `OCI_KEY_FINGERPRINT`, `OCI_SUBNET_ID`, `OCI_IMAGE_ID`, `OCI_OCPUS`, `OCI_MEMORY_IN_GBS`, `OCI_SHAPE`, `OCI_MAX_INSTANCES`, `OCI_AVAILABILITY_DOMAIN`, `OCI_SSH_PUBLIC_KEY`, `CACHE_AVAILABILITY_DOMAINS`, `OCI_BOOT_VOLUME_SIZE_IN_GBS`, `OCI_BOOT_VOLUME_ID`, `TOO_MANY_REQUESTS_TIME_WAIT`, `TELEGRAM_USER_ID`, `TELEGRAM_BOT_API_KEY`, plus:
+   - `OCI_PRIVATE_KEY_CONTENT` — full contents of the `.pem` file (workflow writes it to `/tmp/oci.pem`).
+3. Push / go to Actions -> Hunt ARM -> Run workflow to test.
+4. Disable or delete the workflow once your instance is created to stop polling.
 
-![Launch success 1](images/launch-output-1.png)
+> Do not use GitHub-hosted runners for unrelated long-running polling beyond testing your own repo — it can violate [GitHub Actions terms](https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features#actions). Prefer [cron-job.org](#recommended-cron-joborg) or cron/VPS for continuous hunting.
 
-![Launch success 2](images/launch-output-2.png)
+### Multiple configs
 
-## Assigning public IP address
+Pass a custom env filename as CLI arg for multiple accounts:
 
-We are not doing this during the command run due to the default limitation (2 ephemeral addresses per compartment). That's how you can achieve this. When you'll succeed with creating an instance, open OCI Console, go to Instance Details -> Resources -> Attached VNICs by selecting it's name
-
-![Attached VNICs](images/attached-vnics.png)
-
-Then Resources -> IPv4 Addresses -> Edit
-
-![IPv4 Addresses](images/ipv4-addresses.png)
-
-Choose ephemeral and click "Update"
-
-![Edit IP Address](images/edit-ip-address.png)
-
-## Troubleshooting
-
-### Private key issues
-- `OCI_PRIVATE_KEY_FILENAME` doesn't exist. 
-```bash
-PHP Fatal error:  Uncaught Hitrov\OCI\Exception\PrivateKeyFileNotFoundException: Private key file does not exist: /path/to/oracleidentitycloudservice_***-07-14-10-35.pem in /Users/hitrov/Sites/oci-arm-host-capacity/vendor/hitrov/oci-api-php-request-sign/src/Hitrov/OCI/Signer.php:346
-```
-Make sure path is absolute (full including directories), you should see it's content by executing:
-```bash
-cat /path/to/oracleidentitycloudservice_***-07-14-10-35.pem
-```
-If that's URL make sure it's inside double quotes, and opens without redirections or additional actions:
-```bash
-curl "https://url.to/oracleidentitycloudservice_***-07-14-10-35.pem"
-```
-- Permission denied - private key file is inaccessible for this PHP script:
-```bash
-PHP Warning:  file_get_contents(/path/to/oracleidentitycloudservice_***-07-14-10-35.pem): failed to open stream: Permission denied in /Users/hitrov/Sites/oci-arm-host-capacity/vendor/hitrov/oci-api-php-request-sign/src/Hitrov/OCI/Signer.php on line 225
-PHP Fatal error:  Uncaught TypeError: Return value of Hitrov\OCI\Signer::getPrivateKey() must be of the type string or null, bool returned in /Users/hitrov/Sites/oci-arm-host-capacity/vendor/hitrov/oci-api-php-request-sign/src/Hitrov/OCI/Signer.php:225
-```
-Fastest way to resolve:
-```bash
-chmod 777 /path/to/oracleidentitycloudservice_***-07-14-10-35.pem
-```
-
-### SSH key issues
-- If you have new line(s) / line ending(s) in `OCI_SSH_PUBLIC_KEY` you will encounter:
-```json
-{
-  "code": "InvalidParameter",
-  "message": "Unable to parse message body"
-}
-```
-- If public key is incorrect:
-```json
-{
-    "code": "InvalidParameter",
-    "message": "Invalid ssh public key; must be in base64 format"
-}
-```
-Copy the proper contents of `~/.ssh/id_rsa.pub` again and make sure it's inside double quotes. 
-Or re-generate pair of keys. Make sure you won't unintentionally overwrite your existing ones. 
-
-## Multiple configuration support
-
-If you need 2+ `.env` files (or you have multiple Oracle Cloud Infrastructure accounts), 
-run the script in a way when you pass argument with environment filename e.g. 
 ```bash
 php index.php .env.my_acc1
 ```
-Custom env filenames are supported only for CLI (command line interface). 
-If you call this script with browser/curl using web sapi (Apache, nginx), 
-find the best way to pass the 2nd argument here (e.g. `$_GET` parameter):
-```php
-$dotenv = Dotenv::createUnsafeImmutable(__DIR__, $envFilename);
-```
-as I don't want to overcomplicate this script for rare use cases.
 
-## Conclusion
+Web SAPI (Apache/nginx) ignores `$argv` — wire e.g. `$_GET` to `$envFilename` in `index.php` if you need it there.
 
-That's how you will login when instance will be created (notice opc default username)
+## Telegram notification
+
+1. Create a bot via [@BotFather](https://core.telegram.org/bots), get the token -> `TELEGRAM_BOT_API_KEY`.
+2. Get your numeric chat ID (e.g. via [@userinfobot](https://t.me/userinfobot)) -> `TELEGRAM_USER_ID`.
+3. Set both in `.env` (or GitHub Secrets). On successful launch you get the instance JSON in Telegram.
+
+## How it works
+
+`index.php` -> `OciApi`:
+
+1. `ListInstances` in your compartment. If count of non-`TERMINATED` instances with the same shape >= `OCI_MAX_INSTANCES`, print `Already have an instance(s)...` and exit.
+2. `ListAvailabilityDomains` (or use `OCI_AVAILABILITY_DOMAIN` / cache) to get ADs to try.
+3. `LaunchInstance` per AD with `shapeConfig` (`ocpus`/`memoryInGBs`), `sourceDetails` (image or boot volume), VNIC with `assignPublicIp: false`.
+4. On `Out of host capacity` (500), sleep 16s and try next AD. On 429, enable waiter for `TOO_MANY_REQUESTS_TIME_WAIT` seconds. Other errors stop immediately.
+
+## Assigning a public IP
+
+The script creates instances without public IP (ephemeral limit is 2/compartment). After success: OCI Console -> Instance Details -> Attached VNICs -> select VNIC -> IPv4 Addresses -> Edit -> Ephemeral -> Update.
+
+![Attached VNICs](images/attached-vnics.png)
+
+Login (default user `opc`):
 
 ```bash
-ssh -i ~/.ssh/id_rsa opc@ip.add.re.ss
-```
-
-If you didn't assign public IP, you can still copy internal FQDN or private IP (10.x.x.x) 
-from the instance details page and connect from your other instance in the same VNIC. e.g.
-
-```bash
+ssh -i ~/.ssh/id_rsa opc@<public-ip>
+# or via private DNS from another instance in the same VCN:
 ssh -i ~/.ssh/id_rsa opc@instance-20210714-xxxx.subnet.vcn.oraclevcn.com
 ```
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `PrivateKeyFileNotFoundException` / file does not exist | `OCI_PRIVATE_KEY_FILENAME` path wrong. Verify with `cat /path/to/oci.pem`. For URL form keep it in quotes and check `curl "https://..."` returns the key without redirect/login |
+| `Permission denied` reading `.pem` | Fix ownership / `chmod 600`. Ensure cron user can read it |
+| `InvalidParameter: Unable to parse message body` | `OCI_SSH_PUBLIC_KEY` contains newlines. Must be one line in double quotes |
+| `InvalidParameter: Invalid ssh public key; must be in base64 format` | Wrong key pasted. Re-copy `~/.ssh/id_rsa.pub` or regenerate |
+| `LimitExceeded: standard-a1-...` | Quota hit, not capacity — you already have max instances or need limit increase |
+| `TooManyRequests` loop / `Will retry after N seconds` | Rate-limited by OCI. Increase `TOO_MANY_REQUESTS_TIME_WAIT` or slow down cron/schedule |
+| `OCI_BOOT_VOLUME_ID and OCI_BOOT_VOLUME_SIZE_IN_GBS cannot be used together` | Set only one of them |
+| `OCI_AVAILABILITY_DOMAIN must be specified...` with boot volume | Boot volume is AD-bound — set `OCI_AVAILABILITY_DOMAIN` to the same AD as the volume |
+
+## Credits
+
+- Original project + OCI request signer: [Alexander Hitrov](https://github.com/hitrov/oci-arm-host-capacity)
+- [Medium article](https://hitrov.medium.com/resolving-oracle-cloud-out-of-capacity-issue-and-getting-free-vps-with-4-arm-cores-24gb-of-6ecd5ede6fcc) and [signer package](https://github.com/hitrov/oci-api-php-request-sign)
+- This fork: GitHub Actions `hunt.yml`, secrets-based config, docs refresh. MIT License — see [LICENSE](LICENSE).

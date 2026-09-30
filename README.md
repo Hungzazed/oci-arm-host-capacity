@@ -8,6 +8,8 @@ Forked from [hitrov/oci-arm-host-capacity](https://github.com/hitrov/oci-arm-hos
   <a href="https://github.com/Hungzazed/oci-arm-host-capacity/actions/workflows/hunt.yml"><img src="https://github.com/Hungzazed/oci-arm-host-capacity/actions/workflows/hunt.yml/badge.svg" alt="Hunt ARM"></a>
 </p>
 
+> 📖 Bản tiếng Việt: [README.vi.md](README.vi.md)
+
 > Each tenancy gets 3,000 OCPU hours + 18,000 GB hours / month free for `VM.Standard.A1.Flex` (up to 4 OCPUs / 24 GB RAM). Oracle adds capacity from time to time — this script polls `LaunchInstance` until it succeeds.
 
 **Tip (2024+):** Many users upgrade to Pay-As-You-Go (PAYG) to get priority for free-tier launches. PAYG keeps Always Free benefits, adds fewer `Out of host capacity` errors, and unlocks more services. Set up budget alerts and watch what you deploy.
